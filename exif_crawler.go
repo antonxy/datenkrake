@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
     "sync"
+    "github.com/rwcarlsen/goexif/exif"
 )
 
 type UrlProvider interface {
@@ -89,6 +90,20 @@ func getHref(t html.Token) (ok bool, href string) {
 	return
 }
 
+func getAttr(t html.Token, attr string) (ok bool, href string) {
+	// Iterate over all of the Token's attributes until we find an "href"
+	for _, a := range t.Attr {
+		if a.Key == attr {
+			href = a.Val
+			ok = true
+		}
+	}
+
+	// "bare" return will return the variables (ok, href) as defined in
+	// the function definition
+	return
+}
+
 // Extract all http** links from a given webpage
 func crawl(crawl_url string) {
 	resp, err := http.Get(crawl_url)
@@ -115,36 +130,84 @@ func crawl(crawl_url string) {
 
 			// Check if the token is an <a> tag
 			isAnchor := t.Data == "a"
-			if !isAnchor {
-				continue
-			}
+            isImage := t.Data == "img"
+			if isAnchor {
 
-			// Extract the href value, if there is one
-			ok, a_url := getHref(t)
-			if !ok {
-				continue
-			}
+                // Extract the href value, if there is one
+                ok, a_url := getHref(t)
+                if !ok {
+                    continue
+                }
 
-            u, err := url.Parse(a_url)
-            if err != nil {
-                continue
+                u, err := url.Parse(a_url)
+                if err != nil {
+                    continue
+                }
+                base, err := url.Parse(crawl_url)
+                if err != nil {
+                    continue
+                }
+                a_url_res := base.ResolveReference(u).String()
+
+                // Make sure the url begines in http**
+                hasProto := strings.Index(a_url_res, "http") == 0
+                if hasProto {
+                    urlProviderLock.Lock()
+                    urlProvider.putUrl(a_url_res)
+                    urlProviderLock.Unlock()
+                    //ch <- a_url_res
+                }
+            } else if isImage {
+                ok, img := getAttr(t, "src")
+                if !ok {
+                    continue
+                }
+                u, err := url.Parse(img)
+                if err != nil {
+                    continue
+                }
+                base, err := url.Parse(crawl_url)
+                if err != nil {
+                    continue
+                }
+                img_url_res := base.ResolveReference(u).String()
+                fmt.Printf("Found image %s\n", img_url_res)
+                crawlImage(img_url_res)
             }
-            base, err := url.Parse(crawl_url)
-            if err != nil {
-                continue
-            }
-            a_url_res := base.ResolveReference(u).String()
-
-			// Make sure the url begines in http**
-			hasProto := strings.Index(a_url_res, "http") == 0
-			if hasProto {
-                urlProviderLock.Lock()
-                urlProvider.putUrl(a_url_res)
-                urlProviderLock.Unlock()
-				//ch <- a_url_res
-			}
 		}
 	}
+}
+
+func crawlImage(image_url string) {
+    req, _ := http.NewRequest("GET", image_url, nil)
+    req.Header.Add("Range", "bytes=0-2047")
+    var client http.Client
+    resp, err := client.Do(req)
+    if err != nil {
+        fmt.Printf("Could not GET image %#v\n", err)
+        return
+    }
+    defer resp.Body.Close()
+    exif_info, err := exif.Decode(resp.Body)
+    if err != nil {
+        fmt.Printf("Could not parse EXIF\n")
+        return
+    }
+
+    fmt.Printf("SUC GOT EXIF on: %s  \n", image_url)
+
+    camModel, err := exif_info.Get(exif.Model) // normally, don't ignore errors!
+    if err == nil {
+        val, err := camModel.StringVal()
+        if err == nil {
+            fmt.Printf("SUCSUC EXIF CAMERA MODEL: %s\n", val)
+        }
+    }
+
+    lat, lon, err := exif_info.LatLong()
+    if err == nil {
+        fmt.Printf("SUCSUCSUC EXIF GOT LAT LON: %f %f\n", lat, lon)
+    }
 }
 
 var urlProvider UrlProvider
